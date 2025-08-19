@@ -14,15 +14,14 @@ Usage: python project_index.py
 Output: PROJECT_INDEX.json
 """
 
-__version__ = "0.1.1-safe"
+__version__ = "0.1.0"
 
 import json
 import os
 import re
-import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 
 # Import shared utilities
 from index_utils import (
@@ -450,168 +449,25 @@ def print_summary(index: Dict, skipped_count: int):
         print(f"\n   (Skipped {skipped_count} files in ignored directories)")
 
 
-def create_backup(index_path: Path) -> Optional[Path]:
-    """Create timestamped backup of existing index."""
-    if not index_path.exists():
-        print("ℹ️  No existing PROJECT_INDEX.json to backup")
-        return None
-        
-    backup_dir = Path('.claude-index-backups')
-    backup_dir.mkdir(exist_ok=True)
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_name = f"PROJECT_INDEX_{timestamp}.json"
-    backup_path = backup_dir / backup_name
-    
-    try:
-        import shutil
-        shutil.copy2(index_path, backup_path)
-        print(f"💾 Backup created: {backup_path.name}")
-        return backup_path
-    except Exception as e:
-        print(f"⚠️  Backup failed: {e}")
-        return None
-
-def analyze_changes(old_path: Optional[Path], new_index: Dict) -> bool:
-    """Analyze changes between old and new index. Returns True if changes are significant."""
-    if not old_path or not old_path.exists():
-        print("📝 Creating new PROJECT_INDEX.json (no previous version)")
-        return False
-    
-    try:
-        with open(old_path, 'r', encoding='utf-8') as f:
-            old_index = json.load(f)
-    except Exception as e:
-        print(f"⚠️  Could not read previous index: {e}")
-        return False
-    
-    print("\n🔍 Analyzing changes...")
-    
-    # Compare key statistics
-    old_stats = old_index.get("stats", {})
-    new_stats = new_index.get("stats", {})
-    
-    old_files = old_stats.get("total_files", 0)
-    new_files = new_stats.get("total_files", 0)
-    old_dirs = old_stats.get("total_directories", 0)
-    new_dirs = new_stats.get("total_directories", 0)
-    
-    file_change = new_files - old_files
-    dir_change = new_dirs - old_dirs
-    
-    print(f"📊 Statistics Comparison:")
-    print(f"   Files: {old_files} → {new_files} ({file_change:+d})")
-    print(f"   Directories: {old_dirs} → {new_dirs} ({dir_change:+d})")
-    
-    # Check for significant changes
-    significant_changes = False
-    if abs(file_change) > 10:
-        print(f"⚠️  Large file count change: {abs(file_change)} files")
-        significant_changes = True
-    
-    if abs(dir_change) > 5:
-        print(f"⚠️  Large directory count change: {abs(dir_change)} directories")
-        significant_changes = True
-    
-    # Check for parsing ratio changes
-    old_parsed = sum(old_stats.get("fully_parsed", {}).values())
-    new_parsed = sum(new_stats.get("fully_parsed", {}).values())
-    
-    if old_files > 0 and new_files > 0:
-        old_ratio = old_parsed / old_files
-        new_ratio = new_parsed / new_files
-        ratio_change = abs(new_ratio - old_ratio)
-        
-        if ratio_change > 0.2:  # 20% change in parsing ratio
-            print(f"⚠️  Parsing ratio changed significantly: {old_ratio:.1%} → {new_ratio:.1%}")
-            significant_changes = True
-    
-    if not significant_changes:
-        print("✅ Changes look reasonable")
-    
-    return significant_changes
-
-def confirm_update(significant_changes: bool) -> bool:
-    """Ask for user confirmation if changes are significant."""
-    if not significant_changes:
-        print("✅ Auto-approving safe changes")
-        return True
-    
-    print(f"\n🤔 Significant changes detected")
-    print("Review the analysis above.")
-    
-    try:
-        response = input("Proceed with index update? [y/N]: ").lower().strip()
-        return response in ['y', 'yes']
-    except (EOFError, KeyboardInterrupt):
-        print("\n🚫 Operation cancelled")
-        return False
-
-def safe_save_index(index: Dict, output_path: Path, backup_path: Optional[Path]) -> bool:
-    """Safely save the index with rollback capability."""
-    try:
-        # Write to temporary file first
-        temp_path = output_path.with_suffix('.json.tmp')
-        temp_path.write_text(json.dumps(index, indent=2), encoding='utf-8')
-        
-        # Atomic replace
-        temp_path.replace(output_path)
-        print(f"✅ Index saved successfully: {output_path}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Failed to save index: {e}")
-        
-        # Attempt rollback
-        if backup_path and backup_path.exists():
-            try:
-                import shutil
-                shutil.copy2(backup_path, output_path)
-                print("🔄 Restored previous version from backup")
-            except Exception as restore_error:
-                print(f"❌ Rollback also failed: {restore_error}")
-        
-        return False
-
 def main():
-    """Run the enhanced indexer with safety features."""
-    print("🛡️  Safe Project Index Generator")
-    print("==================================")
+    """Run the enhanced indexer."""
     print("🚀 Building Project Index...")
     print("   Analyzing project structure and documentation...")
     
+    # Build index for current directory
+    index, skipped_count = build_index('.')
+    
+    # Compress if needed
+    index = compress_index_if_needed(index)
+    
+    # Save to PROJECT_INDEX.json
     output_path = Path('PROJECT_INDEX.json')
+    output_path.write_text(json.dumps(index, indent=2))
     
-    # Step 1: Create backup
-    backup_path = create_backup(output_path)
-    
-    # Step 2: Build new index
-    try:
-        index, skipped_count = build_index('.')
-        index = compress_index_if_needed(index)
-    except Exception as e:
-        print(f"❌ Failed to build index: {e}")
-        return
-    
-    # Step 3: Analyze changes
-    significant_changes = analyze_changes(backup_path, index)
-    
-    # Step 4: Get confirmation if needed
-    if not confirm_update(significant_changes):
-        print("🚫 Index update cancelled")
-        return
-    
-    # Step 5: Save safely
-    if not safe_save_index(index, output_path, backup_path):
-        return
-    
-    # Step 6: Print summary
+    # Print summary
     print_summary(index, skipped_count)
     
     print(f"\n💾 Saved to: {output_path}")
-    if backup_path:
-        print(f"💾 Backup stored: {backup_path}")
-    
     print("\n✨ Claude now has architectural awareness of your project!")
     print("   • Knows WHERE to place new code")
     print("   • Understands project structure")
@@ -620,10 +476,6 @@ def main():
     print("   • Prevents code duplication")
     print("   • Ensures proper file placement")
     print("   • Maintains architectural consistency")
-    print("\n🛡️  Safety features:")
-    print("   • Automatic backup before changes")
-    print("   • Change analysis and confirmation")
-    print("   • Rollback on save failure")
 
 
 if __name__ == '__main__':
