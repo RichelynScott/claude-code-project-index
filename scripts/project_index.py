@@ -14,7 +14,7 @@ Usage: python project_index.py
 Output: PROJECT_INDEX.json
 """
 
-__version__ = "0.1.1-safe"
+__version__ = "0.2.0-safe-backups"
 
 import json
 import os
@@ -450,40 +450,185 @@ def print_summary(index: Dict, skipped_count: int):
         print(f"\n   (Skipped {skipped_count} files in ignored directories)")
 
 
-def create_backup(index_path: Path) -> Optional[Path]:
-    """Create timestamped backup of existing index."""
+def load_backup_log(backup_dir: Path) -> Dict[str, Any]:
+    """Load existing backup log or create new one."""
+    log_file = backup_dir / "PROJECT_INDEX_backups_log.json"
+    
+    if log_file.exists():
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"⚠️  Could not load backup log: {e}, creating new one")
+    
+    # Create new log structure
+    return {
+        "log_version": "1.0",
+        "created_at": datetime.now().isoformat(),
+        "project_path": str(Path.cwd().absolute()),
+        "description": "Backup log for PROJECT_INDEX.json - tracks changes made by /index command",
+        "max_backups": 10,
+        "entries": []
+    }
+
+def save_backup_log(backup_dir: Path, log_data: Dict[str, Any]):
+    """Save updated backup log."""
+    log_file = backup_dir / "PROJECT_INDEX_backups_log.json"
+    try:
+        with open(log_file, 'w', encoding='utf-8') as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️  Could not save backup log: {e}")
+
+def manage_backup_rotation(backup_dir: Path, max_backups: int = 10):
+    """Manage backup file rotation, keeping only the most recent backups."""
+    try:
+        # Find all PROJECT_INDEX backup files
+        backup_pattern = "PROJECT_INDEX_*.json"
+        backup_files = list(backup_dir.glob(backup_pattern))
+        
+        # Sort by modification time (newest first)
+        backup_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        
+        # Remove excess backups
+        if len(backup_files) > max_backups:
+            files_to_remove = backup_files[max_backups:]
+            for old_backup in files_to_remove:
+                try:
+                    old_backup.unlink()
+                    print(f"🗑️  Removed old backup: {old_backup.name}")
+                except Exception as e:
+                    print(f"⚠️  Could not remove {old_backup.name}: {e}")
+    
+    except Exception as e:
+        print(f"⚠️  Backup rotation failed: {e}")
+
+def get_file_level_changes(old_index: Optional[Dict], new_index: Dict) -> Dict[str, List[str]]:
+    """Analyze file-level changes between indexes."""
+    if not old_index:
+        return {
+            "files_added": list(new_index.get("files", {}).keys()),
+            "files_removed": [],
+            "files_modified": []
+        }
+    
+    old_files = set(old_index.get("files", {}).keys())
+    new_files = set(new_index.get("files", {}).keys())
+    
+    files_added = list(new_files - old_files)
+    files_removed = list(old_files - new_files)
+    files_modified = []
+    
+    # Check for modifications (simplified - could be enhanced with deeper analysis)
+    for file_path in old_files & new_files:
+        old_file = old_index["files"][file_path]
+        new_file = new_index["files"][file_path]
+        
+        old_func_count = len(old_file.get("functions", {}))
+        new_func_count = len(new_file.get("functions", {}))
+        old_class_count = len(old_file.get("classes", {}))
+        new_class_count = len(new_file.get("classes", {}))
+        
+        if old_func_count != new_func_count or old_class_count != new_class_count:
+            files_modified.append(file_path)
+    
+    return {
+        "files_added": files_added,
+        "files_removed": files_removed,
+        "files_modified": files_modified
+    }
+
+def log_backup_creation(log_data: Dict[str, Any], backup_info: Dict[str, Any]):
+    """Add backup creation entry to log."""
+    log_data["entries"].append(backup_info)
+    # Keep only last 100 log entries to prevent log bloat
+    if len(log_data["entries"]) > 100:
+        log_data["entries"] = log_data["entries"][-100:]
+
+def create_backup(index_path: Path, max_backups: int = 10) -> Optional[Path]:
+    """Create timestamped backup with enhanced management."""
+    backup_dir = Path('.claude-index-backups')
+    backup_dir.mkdir(exist_ok=True)
+    
+    # Load existing log
+    log_data = load_backup_log(backup_dir)
+    
     if not index_path.exists():
         print("ℹ️  No existing PROJECT_INDEX.json to backup")
         return None
         
-    backup_dir = Path('.claude-index-backups')
-    backup_dir.mkdir(exist_ok=True)
-    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_name = f"PROJECT_INDEX_{timestamp}.json"
     backup_path = backup_dir / backup_name
     
     try:
-        import shutil
+        # Create backup
         shutil.copy2(index_path, backup_path)
-        print(f"💾 Backup created: {backup_path.name}")
-        return backup_path
+        backup_size = backup_path.stat().st_size
+        
+        # Create log entry (will be completed after analysis)
+        backup_info = {
+            "timestamp": datetime.now().isoformat(),
+            "backup_filename": backup_name,
+            "backup_size_bytes": backup_size,
+            "previous_stats": None,  # Will be filled in later
+            "new_stats": None,      # Will be filled in later
+            "changes": None,        # Will be filled in later
+            "file_changes": None,   # Will be filled in later
+            "significance_level": "pending",
+            "notes": "Backup created successfully"
+        }
+        
+        print(f"💾 Backup created: {backup_path.name} ({backup_size:,} bytes)")
+        
+        # Manage rotation
+        manage_backup_rotation(backup_dir, max_backups)
+        
+        # Store backup info for later completion (using a simple class to hold data)
+        class BackupInfo:
+            def __init__(self, path, info, log, dir):
+                self.path = path
+                self._backup_info = info
+                self._log_data = log
+                self._backup_dir = dir
+                
+        return BackupInfo(backup_path, backup_info, log_data, backup_dir)
+        
     except Exception as e:
         print(f"⚠️  Backup failed: {e}")
         return None
 
-def analyze_changes(old_path: Optional[Path], new_index: Dict) -> bool:
-    """Analyze changes between old and new index. Returns True if changes are significant."""
+def analyze_changes(backup_info: Optional[Any], new_index: Dict) -> Tuple[bool, Dict[str, Any]]:
+    """Analyze changes between old and new index. Returns (is_significant, change_data)."""
+    change_data = {
+        "old_stats": {},
+        "new_stats": {},
+        "file_changes": {},
+        "significance_level": "auto_approved",
+        "notes": ""
+    }
+    
+    # Extract the actual backup path
+    old_path = None
+    if backup_info and hasattr(backup_info, 'path'):
+        old_path = backup_info.path
+    elif backup_info:
+        old_path = backup_info
+    
     if not old_path or not old_path.exists():
         print("📝 Creating new PROJECT_INDEX.json (no previous version)")
-        return False
+        change_data["new_stats"] = new_index.get("stats", {})
+        change_data["file_changes"] = get_file_level_changes(None, new_index)
+        change_data["notes"] = "Initial index creation"
+        return False, change_data
     
     try:
         with open(old_path, 'r', encoding='utf-8') as f:
             old_index = json.load(f)
     except Exception as e:
         print(f"⚠️  Could not read previous index: {e}")
-        return False
+        change_data["notes"] = f"Could not read previous index: {e}"
+        return False, change_data
     
     print("\n🔍 Analyzing changes...")
     
@@ -503,15 +648,58 @@ def analyze_changes(old_path: Optional[Path], new_index: Dict) -> bool:
     print(f"   Files: {old_files} → {new_files} ({file_change:+d})")
     print(f"   Directories: {old_dirs} → {new_dirs} ({dir_change:+d})")
     
+    # Get file-level changes
+    file_changes = get_file_level_changes(old_index, new_index)
+    
+    # Show file-level changes if any
+    if file_changes["files_added"]:
+        print(f"   📄 Files added: {len(file_changes['files_added'])}")
+        if len(file_changes["files_added"]) <= 5:
+            for file in file_changes["files_added"]:
+                print(f"      + {file}")
+        else:
+            for file in file_changes["files_added"][:3]:
+                print(f"      + {file}")
+            print(f"      ... and {len(file_changes['files_added']) - 3} more")
+    
+    if file_changes["files_removed"]:
+        print(f"   📄 Files removed: {len(file_changes['files_removed'])}")
+        if len(file_changes["files_removed"]) <= 5:
+            for file in file_changes["files_removed"]:
+                print(f"      - {file}")
+        else:
+            for file in file_changes["files_removed"][:3]:
+                print(f"      - {file}")
+            print(f"      ... and {len(file_changes['files_removed']) - 3} more")
+    
+    if file_changes["files_modified"]:
+        print(f"   📄 Files modified: {len(file_changes['files_modified'])}")
+        if len(file_changes["files_modified"]) <= 5:
+            for file in file_changes["files_modified"]:
+                print(f"      ~ {file}")
+        else:
+            for file in file_changes["files_modified"][:3]:
+                print(f"      ~ {file}")
+            print(f"      ... and {len(file_changes['files_modified']) - 3} more")
+    
     # Check for significant changes
     significant_changes = False
+    significance_reasons = []
+    
     if abs(file_change) > 10:
-        print(f"⚠️  Large file count change: {abs(file_change)} files")
         significant_changes = True
+        significance_reasons.append(f"Large file count change: {abs(file_change)} files")
+        print(f"⚠️  Large file count change: {abs(file_change)} files")
     
     if abs(dir_change) > 5:
-        print(f"⚠️  Large directory count change: {abs(dir_change)} directories")
         significant_changes = True
+        significance_reasons.append(f"Large directory count change: {abs(dir_change)} directories")
+        print(f"⚠️  Large directory count change: {abs(dir_change)} directories")
+    
+    if len(file_changes["files_removed"]) > 5:
+        significant_changes = True
+        significance_reasons.append(f"Many files removed: {len(file_changes['files_removed'])}")
+        print(f"⚠️  Many files removed: {len(file_changes['files_removed'])}")
     
     # Check for parsing ratio changes
     old_parsed = sum(old_stats.get("fully_parsed", {}).values())
@@ -523,13 +711,24 @@ def analyze_changes(old_path: Optional[Path], new_index: Dict) -> bool:
         ratio_change = abs(new_ratio - old_ratio)
         
         if ratio_change > 0.2:  # 20% change in parsing ratio
-            print(f"⚠️  Parsing ratio changed significantly: {old_ratio:.1%} → {new_ratio:.1%}")
             significant_changes = True
+            significance_reasons.append(f"Parsing ratio changed: {old_ratio:.1%} → {new_ratio:.1%}")
+            print(f"⚠️  Parsing ratio changed significantly: {old_ratio:.1%} → {new_ratio:.1%}")
     
-    if not significant_changes:
+    # Populate change data
+    change_data["old_stats"] = old_stats
+    change_data["new_stats"] = new_stats
+    change_data["file_changes"] = file_changes
+    
+    if significant_changes:
+        change_data["significance_level"] = "requires_confirmation"
+        change_data["notes"] = "; ".join(significance_reasons)
+    else:
+        change_data["significance_level"] = "auto_approved"
+        change_data["notes"] = f"Routine update: {file_change:+d} files, {dir_change:+d} directories"
         print("✅ Changes look reasonable")
     
-    return significant_changes
+    return significant_changes, change_data
 
 def confirm_update(significant_changes: bool) -> bool:
     """Ask for user confirmation if changes are significant."""
@@ -573,57 +772,170 @@ def safe_save_index(index: Dict, output_path: Path, backup_path: Optional[Path])
         
         return False
 
+def complete_backup_log(backup_info: Optional[Any], change_data: Dict[str, Any], success: bool):
+    """Complete the backup log entry with analysis results."""
+    if not backup_info or not hasattr(backup_info, '_backup_info'):
+        return
+    
+    try:
+        backup_data = backup_info._backup_info
+        log_data = backup_info._log_data
+        backup_dir = backup_info._backup_dir
+        
+        # Complete the backup info
+        backup_data.update({
+            "previous_stats": change_data.get("old_stats", {}),
+            "new_stats": change_data.get("new_stats", {}),
+            "changes": {
+                "files_added": len(change_data.get("file_changes", {}).get("files_added", [])),
+                "files_removed": len(change_data.get("file_changes", {}).get("files_removed", [])),
+                "files_modified": len(change_data.get("file_changes", {}).get("files_modified", [])),
+                "directories_added": change_data.get("new_stats", {}).get("total_directories", 0) - 
+                                   change_data.get("old_stats", {}).get("total_directories", 0)
+            },
+            "file_changes": change_data.get("file_changes", {}),
+            "significance_level": change_data.get("significance_level", "unknown"),
+            "notes": change_data.get("notes", "") + (f" | Success: {success}" if not success else ""),
+            "operation_success": success
+        })
+        
+        # Add to log and save
+        log_backup_creation(log_data, backup_data)
+        save_backup_log(backup_dir, log_data)
+        
+    except Exception as e:
+        print(f"⚠️  Could not complete backup log: {e}")
+
 def main():
-    """Run the enhanced indexer with safety features."""
-    print("🛡️  Safe Project Index Generator")
-    print("==================================")
+    """Run the enhanced indexer with comprehensive backup management."""
+    import sys
+    
+    # Parse command line arguments
+    max_backups = 10
+    show_log = False
+    cleanup_only = False
+    
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] == '--max-backups' and i + 1 < len(sys.argv):
+            try:
+                max_backups = int(sys.argv[i + 1])
+                if max_backups < 1:
+                    max_backups = 10
+                i += 2
+            except ValueError:
+                print("⚠️  Invalid --max-backups value, using default: 10")
+                i += 2
+        elif sys.argv[i] == '--show-backup-log':
+            show_log = True
+            i += 1
+        elif sys.argv[i] == '--cleanup-backups':
+            cleanup_only = True
+            i += 1
+        elif sys.argv[i] == '--version':
+            print(f"Safe PROJECT_INDEX v{__version__}")
+            return
+        else:
+            i += 1
+    
+    print(f"🛡️  Safe Project Index Generator v{__version__}")
+    print("==================================================")
+    
+    # Handle special commands
+    if show_log:
+        backup_dir = Path('.claude-index-backups')
+        if backup_dir.exists():
+            log_data = load_backup_log(backup_dir)
+            print(f"\n📋 Backup Log for: {log_data.get('project_path', 'Unknown')}")
+            print(f"📊 Total entries: {len(log_data.get('entries', []))}")
+            print(f"📁 Max backups: {log_data.get('max_backups', 10)}")
+            
+            entries = log_data.get('entries', [])
+            if entries:
+                print(f"\n📄 Recent entries:")
+                for entry in entries[-5:]:  # Show last 5
+                    print(f"   {entry.get('timestamp', 'Unknown')} - {entry.get('backup_filename', 'Unknown')}")
+                    print(f"      {entry.get('notes', 'No notes')}")
+            else:
+                print("\n📭 No backup entries found")
+        else:
+            print("📭 No backup directory found")
+        return
+    
+    if cleanup_only:
+        backup_dir = Path('.claude-index-backups')
+        if backup_dir.exists():
+            print(f"🗑️  Cleaning up backups (keeping {max_backups} most recent)...")
+            manage_backup_rotation(backup_dir, max_backups)
+            print("✅ Cleanup complete")
+        else:
+            print("📭 No backup directory found")
+        return
+    
     print("🚀 Building Project Index...")
     print("   Analyzing project structure and documentation...")
     
     output_path = Path('PROJECT_INDEX.json')
+    backup_path = None
+    change_data = {}
     
-    # Step 1: Create backup
-    backup_path = create_backup(output_path)
-    
-    # Step 2: Build new index
     try:
-        index, skipped_count = build_index('.')
-        index = compress_index_if_needed(index)
+        # Step 1: Create backup with rotation
+        backup_path = create_backup(output_path, max_backups)
+        
+        # Step 2: Build new index
+        try:
+            index, skipped_count = build_index('.')
+            index = compress_index_if_needed(index)
+        except Exception as e:
+            print(f"❌ Failed to build index: {e}")
+            complete_backup_log(backup_path, {}, False)
+            return
+        
+        # Step 3: Analyze changes
+        significant_changes, change_data = analyze_changes(backup_path, index)
+        
+        # Step 4: Get confirmation if needed
+        if not confirm_update(significant_changes):
+            print("🚫 Index update cancelled")
+            complete_backup_log(backup_path, change_data, False)
+            return
+        
+        # Step 5: Save safely
+        if not safe_save_index(index, output_path, backup_path):
+            complete_backup_log(backup_path, change_data, False)
+            return
+        
+        # Step 6: Complete logging
+        complete_backup_log(backup_path, change_data, True)
+        
+        # Step 7: Print summary
+        print_summary(index, skipped_count)
+        
+        print(f"\n💾 Saved to: {output_path}")
+        if backup_path:
+            backup_name = backup_path.path.name if hasattr(backup_path, 'path') else str(backup_path)
+            print(f"💾 Backup stored: {backup_name}")
+            print(f"📋 Log updated: .claude-index-backups/PROJECT_INDEX_backups_log.json")
+        
+        print("\n✨ Claude now has architectural awareness of your project!")
+        print("   • Knows WHERE to place new code")
+        print("   • Understands project structure")
+        print("   • Can navigate documentation")
+        print("\n📌 Benefits:")
+        print("   • Prevents code duplication")
+        print("   • Ensures proper file placement")
+        print("   • Maintains architectural consistency")
+        print("\n🛡️  Enhanced safety features:")
+        print(f"   • Automatic backup rotation (max {max_backups} backups)")
+        print("   • Comprehensive change logging with file-level details")
+        print("   • Smart significance detection and confirmation")
+        print("   • Atomic operations with rollback capability")
+        print(f"\n💡 Use --show-backup-log to view change history")
+        
     except Exception as e:
-        print(f"❌ Failed to build index: {e}")
-        return
-    
-    # Step 3: Analyze changes
-    significant_changes = analyze_changes(backup_path, index)
-    
-    # Step 4: Get confirmation if needed
-    if not confirm_update(significant_changes):
-        print("🚫 Index update cancelled")
-        return
-    
-    # Step 5: Save safely
-    if not safe_save_index(index, output_path, backup_path):
-        return
-    
-    # Step 6: Print summary
-    print_summary(index, skipped_count)
-    
-    print(f"\n💾 Saved to: {output_path}")
-    if backup_path:
-        print(f"💾 Backup stored: {backup_path}")
-    
-    print("\n✨ Claude now has architectural awareness of your project!")
-    print("   • Knows WHERE to place new code")
-    print("   • Understands project structure")
-    print("   • Can navigate documentation")
-    print("\n📌 Benefits:")
-    print("   • Prevents code duplication")
-    print("   • Ensures proper file placement")
-    print("   • Maintains architectural consistency")
-    print("\n🛡️  Safety features:")
-    print("   • Automatic backup before changes")
-    print("   • Change analysis and confirmation")
-    print("   • Rollback on save failure")
+        print(f"❌ Unexpected error: {e}")
+        complete_backup_log(backup_path, change_data, False)
 
 
 if __name__ == '__main__':
